@@ -1,10 +1,23 @@
 # Terraform
 .terraform/
+**/.terraform/*
+
+# Terraform state (never commit)
 *.tfstate
 *.tfstate.*
+.terraform.tfstate.lock.info
+
+# Variable files (often contain secrets)
 terraform.tfvars
+terraform.tfvars.json
 *.tfvars
-.crash.log
+*.tfvars.json
+
+# Plan files
+*.tfplan
+
+# Terraform crash logs
+crash.log
 *.log
 
 # OS/editor

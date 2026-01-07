@@ -163,6 +163,110 @@ TLS / HTTPS can be added later using ACM + domain if account permissions allow.
 
 ---
 
+## Salesforce Named Credential Setup (POC)
+
+### Why Named Credentials
+Salesforce uses **Named Credentials** to define outbound callouts in a secure, reusable way.  
+For this POC, we intentionally use **HTTP (port 80)** to avoid TLS certificates and domain ownership requirements.
+
+This keeps the focus on validating **Private Connect + PrivateLink connectivity**.
+
+---
+
+### Option A: Legacy Named Credential (Recommended for POC)
+
+> Use this option if HTTPS / certificates are not available.
+
+1. Go to **Setup → Named Credentials**
+2. Click **New (Legacy)**
+3. Configure:
+   - **Label**: `AWS PrivateLink POC`
+   - **Name**: `AWS_PrivateLink_POC`
+   - **URL**:  
+     ```
+     http://<internal-nlb-dns-name>
+     ```
+     Example:
+     ```
+     http://sf-privateconnect-01-nlb-xxxxxxxx.elb.us-east-1.amazonaws.com
+     ```
+   - **Identity Type**: Anonymous
+   - **Authentication Protocol**: No Authentication
+4. Save
+
+> The internal NLB DNS name comes from the Terraform output:
+```bash
+terraform output nlb_dns_name
+```
+
+---
+
+### Option B: New Named Credential (Private Connect Aware)
+
+> Use this if your org supports **Private Connect + External Credentials**.
+
+1. Go to **Setup → Named Credentials**
+2. Click **New**
+3. Configure:
+   - **Label / Name**: `AWS PrivateLink POC`
+   - **URL**:
+     ```
+     http://<internal-nlb-dns-name>
+     ```
+   - **External Credential**: Create a new one
+     - Authentication: **No Authentication**
+4. Under **Outbound Network Connection**, select:
+   - Your **Private Connect** entry created earlier
+5. Save
+
+---
+
+### Apex Test Callout
+
+Use the Named Credential in Apex:
+
+```apex
+HttpRequest req = new HttpRequest();
+req.setEndpoint('callout:AWS_PrivateLink_POC');
+req.setMethod('GET');
+
+Http http = new Http();
+HttpResponse res = http.send(req);
+
+System.debug(res.getStatus());
+System.debug(res.getBody());
+```
+
+Expected response:
+```
+<h1>Salesforce Private Connect POC OK 🚀</h1>
+```
+
+---
+
+### Common Troubleshooting
+
+- **Read timed out**
+  - Check Target Group health = `healthy`
+  - Ensure EC2 security group allows port 80
+- **Connection refused**
+  - Listener not created on NLB
+- **Named Credential cannot save**
+  - Use Legacy Named Credential for HTTP
+  - New Named Credential enforces HTTPS in some orgs
+
+---
+
+### Production Notes
+
+For production:
+- Use HTTPS (443)
+- Attach ACM certificate to NLB
+- Use a real domain (Route 53 or corporate DNS)
+- Restrict `allowed_principals` to Salesforce AWS account
+
+---
+
 ## Verifying AWS Side
 
 Terraform does not wait for target health checks.
