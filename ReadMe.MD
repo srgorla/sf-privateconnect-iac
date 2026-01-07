@@ -153,10 +153,13 @@ This value is required in **Salesforce Setup → Private Connect**.
 
 ## Salesforce Side (High-Level)
 
+https://www.youtube.com/watch?v=KHE8pWnnpVE&t=169s
+
 1. Go to **Setup → Private Connect**
 2. Create a new Private Connection
 3. Paste the **endpoint service name** from Terraform output
 4. (POC) Use **Legacy Named Credential** with `http://`
+   you can use nlb  url - (ex: nlb_dns_name = "sf-privateconnect-01-nlb-532072e04e35fa9f.elb.us-east-1.amazonaws.com")
 5. Test callout using Apex
 
 TLS / HTTPS can be added later using ACM + domain if account permissions allow.
@@ -227,6 +230,7 @@ Use the Named Credential in Apex:
 
 ```apex
 HttpRequest req = new HttpRequest();
+//req.setEndpoint('callout:t1');
 req.setEndpoint('callout:AWS_PrivateLink_POC');
 req.setMethod('GET');
 
