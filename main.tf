@@ -50,13 +50,13 @@ resource "aws_security_group" "web_sg" {
   vpc_id      = data.aws_vpc.selected.id
 
   ingress {
-    description = "HTTP"
+    description = "HTTP from VPC"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
 
     # For POC convenience. For tighter security, restrict to VPC CIDR or NLB subnets.
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [data.aws_vpc.selected.cidr_block]
   }
 
   egress {
@@ -95,10 +95,21 @@ resource "aws_instance" "web" {
   user_data = <<-EOF
               #!/bin/bash
               dnf update -y
-              dnf install -y httpd
-              systemctl enable httpd
-              systemctl start httpd
-              echo "<h1>Salesforce Private Connect POC OK 🚀</h1>" > /var/www/html/index.html
+              dnf install -y python3
+              pip3 install flask
+
+              cat << 'APP' > /opt/app.py
+              from flask import Flask, jsonify
+              app = Flask(__name__)
+
+              @app.get("/poc")
+              def poc():
+                  return jsonify(ok=True, message="Hello from AWS via PrivateLink")
+
+              app.run(host="0.0.0.0", port=80)
+              APP
+
+              python3 /opt/app.py &
               EOF
 
   tags = {
