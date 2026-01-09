@@ -5,6 +5,14 @@ terraform {
       source  = "hashicorp/aws"
       version = ">= 5.0"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = ">= 3.0"
+    }
+    archive = {
+      source  = "hashicorp/archive"
+      version = ">= 2.0"
+    }
   }
 }
 
@@ -16,44 +24,71 @@ provider "aws" {
   region = var.aws_region
 }
 
+data "aws_caller_identity" "current" {}
+
 ########################################
-# Network: Use default VPC by default
+# Network: Create a dedicated VPC
 ########################################
 
-data "aws_vpc" "default" {
-  default = true
-}
+resource "aws_vpc" "main" {
+  cidr_block           = var.vpc_cidr
+  enable_dns_support   = true
+  enable_dns_hostnames = true
 
-data "aws_vpc" "selected" {
-  id = var.vpc_id != "" ? var.vpc_id : data.aws_vpc.default.id
-}
-
-data "aws_subnets" "selected" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.selected.id]
+  tags = {
+    Name = "${var.name_prefix}-vpc"
   }
 }
 
-data "aws_subnets" "instance" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.selected.id]
+resource "aws_internet_gateway" "main" {
+  vpc_id = aws_vpc.main.id
+
+  tags = {
+    Name = "${var.name_prefix}-igw"
+  }
+}
+
+resource "aws_subnet" "public" {
+  count                   = length(var.allowed_azs)
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = cidrsubnet(var.vpc_cidr, var.public_subnet_newbits, count.index)
+  availability_zone       = var.allowed_azs[count.index]
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name = "${var.name_prefix}-public-${var.allowed_azs[count.index]}"
+  }
+}
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.main.id
   }
 
-  # Avoid unsupported instance types in certain AZs.
-  filter {
-    name   = "availability-zone"
-    values = var.allowed_azs
+  tags = {
+    Name = "${var.name_prefix}-public-rt"
   }
+}
+
+resource "aws_route_table_association" "public" {
+  count          = length(aws_subnet.public)
+  subnet_id      = aws_subnet.public[count.index].id
+  route_table_id = aws_route_table.public.id
 }
 
 locals {
-  # For a POC, use all subnets in the selected VPC.
-  nlb_subnet_ids = sort(data.aws_subnets.selected.ids)
-
-  # Use a filtered set for the EC2 instance only.
-  instance_subnet_ids = sort(data.aws_subnets.instance.ids)
+  # For a POC, use all public subnets in the VPC.
+  nlb_subnet_ids      = sort(aws_subnet.public[*].id)
+  instance_subnet_ids = sort(aws_subnet.public[*].id)
+  lambda_subnet_ids   = sort(aws_subnet.public[*].id)
+  s3_vpc_bucket_name  = var.s3_bucket_name != "" ? var.s3_bucket_name : "${var.name_prefix}-vpc-${random_id.s3_suffix.hex}"
+  s3_public_bucket_name = var.s3_public_bucket_name != "" ? var.s3_public_bucket_name : "${var.name_prefix}-public-${random_id.s3_suffix.hex}"
+  s3_privateconnect_bucket_name = var.s3_privateconnect_bucket_name != "" ? var.s3_privateconnect_bucket_name : "${var.name_prefix}-pc-${random_id.s3_suffix.hex}"
+  s3_privateconnect_principals = length(var.s3_privateconnect_principals) > 0 ? var.s3_privateconnect_principals : var.allowed_principals
+  s3_policy_admin_principals   = distinct(concat(var.s3_policy_admin_principals, [data.aws_caller_identity.current.arn]))
 }
 
 ########################################
@@ -90,7 +125,7 @@ resource "aws_iam_instance_profile" "web_ssm_profile" {
 resource "aws_security_group" "web_sg" {
   name        = "${var.name_prefix}-web-sg"
   description = "Allow HTTP inbound for POC web server"
-  vpc_id      = data.aws_vpc.selected.id
+  vpc_id      = aws_vpc.main.id
 
   ingress {
     description = "HTTP from VPC"
@@ -98,8 +133,8 @@ resource "aws_security_group" "web_sg" {
     to_port     = 80
     protocol    = "tcp"
 
-    # For POC convenience. For tighter security, restrict to VPC CIDR or NLB subnets.
-    cidr_blocks = [data.aws_vpc.selected.cidr_block]
+    # For POC convenience. For tighter security, restrict to NLB subnets.
+    cidr_blocks = [aws_vpc.main.cidr_block]
   }
 
   egress {
@@ -190,6 +225,267 @@ resource "aws_instance" "web" {
 }
 
 ########################################
+# S3: Public, VPC-only, and PrivateConnect-only buckets
+########################################
+
+resource "random_id" "s3_suffix" {
+  byte_length = 4
+}
+
+resource "aws_s3_bucket" "private" {
+  bucket = local.s3_vpc_bucket_name
+
+  tags = {
+    Name = "${var.name_prefix}-vpc-bucket"
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "private" {
+  bucket                  = aws_s3_bucket.private.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_ownership_controls" "private" {
+  bucket = aws_s3_bucket.private.id
+
+  rule {
+    object_ownership = "BucketOwnerPreferred"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "private" {
+  bucket = aws_s3_bucket.private.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_object" "seed" {
+  for_each = fileset("${path.module}/s3_files", "*")
+  bucket   = aws_s3_bucket.private.id
+  key      = each.value
+  source   = "${path.module}/s3_files/${each.value}"
+  etag     = filemd5("${path.module}/s3_files/${each.value}")
+}
+
+resource "aws_vpc_endpoint" "s3" {
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.${var.aws_region}.s3"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = [aws_route_table.public.id]
+
+  tags = {
+    Name = "${var.name_prefix}-s3-gateway-endpoint"
+  }
+}
+
+data "aws_iam_policy_document" "s3_vpce_only" {
+  statement {
+    sid    = "DenyNonVpceAccess"
+    effect = "Deny"
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+
+    actions = ["s3:*"]
+    resources = [
+      aws_s3_bucket.private.arn,
+      "${aws_s3_bucket.private.arn}/*",
+    ]
+
+    condition {
+      test     = "StringNotEquals"
+      variable = "aws:SourceVpce"
+      values   = [aws_vpc_endpoint.s3.id]
+    }
+
+    condition {
+      test     = "ArnNotEquals"
+      variable = "aws:PrincipalArn"
+      values   = local.s3_policy_admin_principals
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "private_vpce_only" {
+  bucket = aws_s3_bucket.private.id
+  policy = data.aws_iam_policy_document.s3_vpce_only.json
+
+  depends_on = [aws_s3_object.seed]
+}
+
+resource "aws_s3_bucket" "public" {
+  bucket = local.s3_public_bucket_name
+
+  tags = {
+    Name = "${var.name_prefix}-public-bucket"
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "public" {
+  bucket                  = aws_s3_bucket.public.id
+  block_public_acls       = false
+  block_public_policy     = false
+  ignore_public_acls      = false
+  restrict_public_buckets = false
+}
+
+resource "aws_s3_bucket_ownership_controls" "public" {
+  bucket = aws_s3_bucket.public.id
+
+  rule {
+    object_ownership = "BucketOwnerPreferred"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "public" {
+  bucket = aws_s3_bucket.public.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_object" "public_seed" {
+  for_each = fileset("${path.module}/s3_files", "*")
+  bucket   = aws_s3_bucket.public.id
+  key      = each.value
+  source   = "${path.module}/s3_files/${each.value}"
+  etag     = filemd5("${path.module}/s3_files/${each.value}")
+}
+
+data "aws_iam_policy_document" "s3_public_read" {
+  count = var.enable_public_bucket_policy ? 1 : 0
+
+  statement {
+    sid     = "AllowPublicReadObjects"
+    effect  = "Allow"
+    actions = ["s3:GetObject"]
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+
+    resources = ["${aws_s3_bucket.public.arn}/*"]
+  }
+
+  statement {
+    sid     = "AllowPublicListBucket"
+    effect  = "Allow"
+    actions = ["s3:ListBucket"]
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+
+    resources = [aws_s3_bucket.public.arn]
+  }
+}
+
+resource "aws_s3_bucket_policy" "public_read" {
+  count  = var.enable_public_bucket_policy ? 1 : 0
+  bucket = aws_s3_bucket.public.id
+  policy = data.aws_iam_policy_document.s3_public_read[0].json
+
+  depends_on = [aws_s3_object.public_seed]
+}
+
+resource "aws_s3_bucket" "privateconnect" {
+  bucket = local.s3_privateconnect_bucket_name
+
+  tags = {
+    Name = "${var.name_prefix}-privateconnect-bucket"
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "privateconnect" {
+  bucket                  = aws_s3_bucket.privateconnect.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_ownership_controls" "privateconnect" {
+  bucket = aws_s3_bucket.privateconnect.id
+
+  rule {
+    object_ownership = "BucketOwnerPreferred"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "privateconnect" {
+  bucket = aws_s3_bucket.privateconnect.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_object" "privateconnect_seed" {
+  for_each = fileset("${path.module}/s3_files", "*")
+  bucket   = aws_s3_bucket.privateconnect.id
+  key      = each.value
+  source   = "${path.module}/s3_files/${each.value}"
+  etag     = filemd5("${path.module}/s3_files/${each.value}")
+}
+
+data "aws_iam_policy_document" "s3_privateconnect_only" {
+  statement {
+    sid    = "DenyNonApprovedPrincipals"
+    effect = "Deny"
+
+    not_principals {
+      type        = "AWS"
+      identifiers = concat(local.s3_privateconnect_principals, local.s3_policy_admin_principals)
+    }
+
+    actions = ["s3:*"]
+    resources = [
+      aws_s3_bucket.privateconnect.arn,
+      "${aws_s3_bucket.privateconnect.arn}/*",
+    ]
+  }
+
+  statement {
+    sid     = "AllowApprovedPrincipalsRead"
+    effect  = "Allow"
+    actions = ["s3:GetObject", "s3:ListBucket"]
+
+    principals {
+      type        = "AWS"
+      identifiers = local.s3_privateconnect_principals
+    }
+
+    resources = [
+      aws_s3_bucket.privateconnect.arn,
+      "${aws_s3_bucket.privateconnect.arn}/*",
+    ]
+  }
+}
+
+resource "aws_s3_bucket_policy" "privateconnect_only" {
+  bucket = aws_s3_bucket.privateconnect.id
+  policy = data.aws_iam_policy_document.s3_privateconnect_only.json
+
+  depends_on = [aws_s3_object.privateconnect_seed]
+}
+
+########################################
 # NLB + Target Group + Listener (TCP:80)
 ########################################
 
@@ -208,7 +504,7 @@ resource "aws_lb_target_group" "tg" {
   name        = "${var.name_prefix}-tg"
   port        = 80
   protocol    = "TCP"
-  vpc_id      = data.aws_vpc.selected.id
+  vpc_id      = aws_vpc.main.id
   target_type = "ip"
 
   # TCP health check is simplest for an NLB POC
@@ -279,14 +575,14 @@ resource "aws_security_group" "ssm_endpoint_sg" {
   count       = var.enable_ssm_endpoints ? 1 : 0
   name        = "${var.name_prefix}-ssm-endpoint-sg"
   description = "Allow HTTPS to SSM VPC endpoints"
-  vpc_id      = data.aws_vpc.selected.id
+  vpc_id      = aws_vpc.main.id
 
   ingress {
     description = "HTTPS from VPC"
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
-    cidr_blocks = [data.aws_vpc.selected.cidr_block]
+    cidr_blocks = [aws_vpc.main.cidr_block]
   }
 
   egress {
@@ -304,7 +600,7 @@ resource "aws_security_group" "ssm_endpoint_sg" {
 
 resource "aws_vpc_endpoint" "ssm" {
   count               = var.enable_ssm_endpoints ? 1 : 0
-  vpc_id              = data.aws_vpc.selected.id
+  vpc_id              = aws_vpc.main.id
   service_name        = "com.amazonaws.${var.aws_region}.ssm"
   vpc_endpoint_type   = "Interface"
   private_dns_enabled = true
@@ -314,7 +610,7 @@ resource "aws_vpc_endpoint" "ssm" {
 
 resource "aws_vpc_endpoint" "ssmmessages" {
   count               = var.enable_ssm_endpoints ? 1 : 0
-  vpc_id              = data.aws_vpc.selected.id
+  vpc_id              = aws_vpc.main.id
   service_name        = "com.amazonaws.${var.aws_region}.ssmmessages"
   vpc_endpoint_type   = "Interface"
   private_dns_enabled = true
@@ -324,10 +620,135 @@ resource "aws_vpc_endpoint" "ssmmessages" {
 
 resource "aws_vpc_endpoint" "ec2messages" {
   count               = var.enable_ssm_endpoints ? 1 : 0
-  vpc_id              = data.aws_vpc.selected.id
+  vpc_id              = aws_vpc.main.id
   service_name        = "com.amazonaws.${var.aws_region}.ec2messages"
   vpc_endpoint_type   = "Interface"
   private_dns_enabled = true
   subnet_ids          = local.nlb_subnet_ids
   security_group_ids  = [aws_security_group.ssm_endpoint_sg[0].id]
+}
+
+########################################
+# Lambda + API Gateway (FAQ microservice)
+########################################
+
+resource "aws_iam_role" "faq_lambda_role" {
+  name = "${var.name_prefix}-faq-lambda-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "faq_lambda_basic" {
+  role       = aws_iam_role.faq_lambda_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_iam_role_policy_attachment" "faq_lambda_vpc" {
+  role       = aws_iam_role.faq_lambda_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+}
+
+resource "aws_security_group" "faq_lambda_sg" {
+  name        = "${var.name_prefix}-faq-lambda-sg"
+  description = "Security group for FAQ Lambda"
+  vpc_id      = aws_vpc.main.id
+
+  egress {
+    description = "All outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "${var.name_prefix}-faq-lambda-sg"
+  }
+}
+
+data "archive_file" "faq_lambda_zip" {
+  type        = "zip"
+  source_dir  = "${path.module}/lambda/faq"
+  output_path = "${path.module}/lambda/faq.zip"
+}
+
+resource "aws_lambda_function" "faq" {
+  function_name = "${var.name_prefix}-faq"
+  description   = "Provide a random FAQ"
+  role          = aws_iam_role.faq_lambda_role.arn
+  handler       = "index.handler"
+  runtime       = "nodejs22.x"
+
+  filename         = data.archive_file.faq_lambda_zip.output_path
+  source_code_hash = data.archive_file.faq_lambda_zip.output_base64sha256
+
+  vpc_config {
+    subnet_ids         = local.lambda_subnet_ids
+    security_group_ids = [aws_security_group.faq_lambda_sg.id]
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.faq_lambda_basic,
+    aws_iam_role_policy_attachment.faq_lambda_vpc,
+  ]
+}
+
+resource "aws_api_gateway_rest_api" "faq" {
+  name        = "${var.name_prefix}-faq-api"
+  description = "Provide a random FAQ"
+}
+
+resource "aws_api_gateway_method" "faq_get_root" {
+  rest_api_id   = aws_api_gateway_rest_api.faq.id
+  resource_id   = aws_api_gateway_rest_api.faq.root_resource_id
+  http_method   = "GET"
+  authorization = "NONE"
+}
+
+resource "aws_api_gateway_integration" "faq_lambda" {
+  rest_api_id = aws_api_gateway_rest_api.faq.id
+  resource_id = aws_api_gateway_rest_api.faq.root_resource_id
+  http_method = aws_api_gateway_method.faq_get_root.http_method
+
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.faq.invoke_arn
+}
+
+resource "aws_lambda_permission" "faq_apigw" {
+  statement_id  = "AllowExecutionFromApiGateway"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.faq.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_api_gateway_rest_api.faq.execution_arn}/*/*"
+}
+
+resource "aws_api_gateway_deployment" "faq" {
+  rest_api_id = aws_api_gateway_rest_api.faq.id
+
+  triggers = {
+    redeploy = sha1(jsonencode([
+      aws_api_gateway_method.faq_get_root.id,
+      aws_api_gateway_integration.faq_lambda.id,
+    ]))
+  }
+
+  depends_on = [aws_api_gateway_integration.faq_lambda]
+}
+
+resource "aws_api_gateway_stage" "faq" {
+  rest_api_id   = aws_api_gateway_rest_api.faq.id
+  deployment_id = aws_api_gateway_deployment.faq.id
+  stage_name    = "myDeployment"
 }

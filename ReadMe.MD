@@ -2,7 +2,7 @@
 
 This repository provisions a **Salesforce Private Connect (AWS PrivateLink) proof of concept** using Terraform.
 
-It creates a private AWS backend (EC2 + internal Network Load Balancer) exposed via a **VPC Endpoint Service**, which Salesforce can connect to using **Private Connect**, without traversing the public internet.
+It creates a private AWS backend (EC2 + internal Network Load Balancer) exposed via a **VPC Endpoint Service**, which Salesforce can connect to using **Private Connect**, without traversing the public internet. It also provisions a **FAQ Lambda + API Gateway** example wired into the same VPC.
 
 The setup is designed for **short-lived AWS accounts** (e.g. Pluralsight labs) and can be recreated end-to-end in minutes.
 
@@ -15,15 +15,15 @@ Salesforce Org
    |
    |  (Private Connect)
    |
-AWS PrivateLink
-   |
-VPC Endpoint Service
-   |
-Internal Network Load Balancer (TCP : 80)
-   |
-Target Group (IP)
-   |
-EC2 Instance (Simple HTTP Server)
+AWS PrivateLink                         Amazon API Gateway
+   |                                         |
+VPC Endpoint Service                         |
+   |                                         |
+Internal Network Load Balancer (TCP : 80)    |
+   |                                         |
+Target Group (IP)                            |
+   |                                         |
+EC2 Instance (Simple HTTP Server)        Lambda (VPC-attached)
 ```
 
 Key properties:
@@ -36,7 +36,7 @@ Key properties:
 
 ## What This Terraform Creates
 
-- Uses **default VPC** (for simplicity)
+- Dedicated **VPC** with public subnets + internet gateway
 - EC2 instance running a simple REST endpoint (`/hello`)
 - Internal Network Load Balancer
 - Target Group (type: `ip`)
@@ -45,6 +45,9 @@ Key properties:
 - Outputs the **endpoint service name** required by Salesforce
 - Endpoint service requires acceptance and is restricted to the Salesforce IAM role (see `allowed_principals`)
 - EC2 instance uses SSM Session Manager (enabled by default); optional VPC endpoints for private subnets
+- S3 buckets (public, VPC-only, PrivateConnect-only) seeded with sample files
+- FAQ Lambda function deployed into the VPC
+- API Gateway REST endpoint that invokes the FAQ Lambda
 
 ---
 
@@ -67,7 +70,8 @@ aws --version
   - Network Load Balancer
   - Target Groups
   - VPC Endpoint Service (PrivateLink)
-- Default VPC must exist
+  - Lambda + API Gateway
+  - S3 buckets and policies
 
 ---
 
@@ -98,6 +102,8 @@ sf-privateconnect-iac/
 ├── main.tf        # AWS resources (EC2, NLB, PrivateLink)
 ├── variables.tf   # Input variables
 ├── outputs.tf     # Terraform outputs
+├── lambda/faq     # FAQ Lambda source
+├── s3_files       # Seed files for S3 buckets
 └── ReadMe.MD
 ```
 
@@ -116,22 +122,47 @@ Defined in `variables.tf`:
 |--------|--------|
 | `aws_region` | AWS region (default: us-east-1) |
 | `name_prefix` | Prefix for all AWS resources |
-| `vpc_id` | Optional custom VPC (empty = default VPC) |
+| `vpc_cidr` | CIDR for the VPC |
+| `public_subnet_newbits` | CIDR split size for public subnets |
+| `allowed_azs` | AZs used for public subnets |
 | `instance_type` | EC2 instance type |
 | `acceptance_required` | Require manual endpoint acceptance (default: true) |
 | `allowed_principals` | Salesforce AWS principal ARN(s) (default: provided role) |
 | `enable_ssm_endpoints` | Create SSM VPC endpoints for private subnets (default: false) |
+| `enable_tls_listener` | Enable NLB TLS listener (default: false) |
+| `tls_cert_arn` | ACM cert ARN for NLB TLS listener |
+| `s3_bucket_name` | Optional explicit bucket name for VPC-only bucket |
+| `s3_public_bucket_name` | Optional explicit bucket name for public bucket |
+| `enable_public_bucket_policy` | Attach public-read policy to public bucket (may be blocked in labs) |
+| `s3_privateconnect_bucket_name` | Optional explicit bucket name for PrivateConnect-only bucket |
+| `s3_privateconnect_principals` | IAM principals for PrivateConnect-only bucket |
+| `s3_policy_admin_principals` | Extra principals allowed to manage S3 bucket policies |
 
 ---
 
 ## Deploying the Infrastructure
 
-Recommended approach is to override `name_prefix` at runtime to avoid name collisions.
+Recommended approach is to set `name_prefix` to avoid name collisions. If you want to keep multiple stacks, use a separate workspace or state file.
 
 ```bash
 terraform init
-terraform plan  -var="name_prefix=sf-privateconnect-01"
-terraform apply -var="name_prefix=sf-privateconnect-01"
+terraform plan
+terraform apply
+```
+
+### Multiple Stacks (Keep Old + New)
+
+If you want to create a new stack without destroying the old one, use a separate state:
+
+Workspace approach:
+```bash
+terraform workspace new lab02
+terraform apply
+```
+
+State file approach:
+```bash
+terraform apply -state=terraform-lab02.tfstate
 ```
 
 ---
@@ -143,7 +174,7 @@ The EC2 instance is configured with the SSM agent and IAM role for Session Manag
 If your subnets are private (no internet/NAT), enable VPC endpoints:
 
 ```bash
-terraform apply -var="name_prefix=sf-privateconnect-01" -var="enable_ssm_endpoints=true"
+terraform apply -var="enable_ssm_endpoints=true"
 ```
 
 ---
@@ -175,6 +206,11 @@ endpoint_service_name = com.amazonaws.vpce.us-east-1.vpce-svc-xxxxxxxx
 ```
 
 This value is required in **Salesforce Setup → Private Connect**.
+
+FAQ API output:
+```
+faq_api_invoke_url = https://xxxxxxxxxx.execute-api.us-east-1.amazonaws.com/myDeployment/
+```
 
 ---
 
@@ -325,8 +361,17 @@ Target status should be `healthy`.
 To destroy the stack:
 
 ```bash
-terraform destroy -var="name_prefix=sf-privateconnect-01"
+terraform destroy
 ```
+
+If Terraform state gets stuck (common in short-lived lab accounts), you can wipe local state to start fresh:
+
+```bash
+rm -rf .terraform
+rm -f terraform.tfstate terraform.tfstate.backup
+```
+
+Note: this only removes **local** state. AWS resources already created will remain unless you destroy them first.
 
 ---
 
@@ -347,9 +392,11 @@ terraform destroy -var="name_prefix=sf-privateconnect-01"
 1. Configure AWS CLI
 2. Clone repo
 3. Run `terraform init`
-4. Use a **new `name_prefix`**
+4. Use a **new `name_prefix`** or a new workspace
 5. Apply
 6. Wire Salesforce Private Connect
+
+Note: the S3 bucket policies automatically allow the current caller to manage them. If you use additional admin principals, set `s3_policy_admin_principals`.
 
 No manual AWS console steps required.
 

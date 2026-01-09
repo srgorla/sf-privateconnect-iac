@@ -1,0 +1,2 @@
+- Private bucket seeded by Terraform
+- Access restricted to VPC endpoint only

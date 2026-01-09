@@ -1,0 +1,2 @@
+Hello from the private S3 bucket.
+This object is intended to be accessed only through the VPC endpoint.

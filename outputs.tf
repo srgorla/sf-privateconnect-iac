@@ -1,6 +1,6 @@
 output "vpc_id" {
-  description = "Selected VPC ID (default VPC if vpc_id var is empty)"
-  value       = data.aws_vpc.selected.id
+  description = "VPC ID created for this stack"
+  value       = aws_vpc.main.id
 }
 
 output "nlb_arn" {
@@ -36,4 +36,34 @@ output "endpoint_service_name" {
 output "endpoint_service_id" {
   description = "VPC Endpoint Service ID"
   value       = aws_vpc_endpoint_service.endpoint_service.id
+}
+
+output "s3_bucket_name" {
+  description = "Name of the VPC-only S3 bucket"
+  value       = aws_s3_bucket.private.id
+}
+
+output "s3_vpc_endpoint_id" {
+  description = "Gateway VPC endpoint ID for S3"
+  value       = aws_vpc_endpoint.s3.id
+}
+
+output "s3_public_bucket_name" {
+  description = "Name of the public S3 bucket"
+  value       = aws_s3_bucket.public.id
+}
+
+output "s3_privateconnect_bucket_name" {
+  description = "Name of the PrivateConnect-only S3 bucket"
+  value       = aws_s3_bucket.privateconnect.id
+}
+
+output "faq_lambda_name" {
+  description = "Name of the FAQ Lambda function"
+  value       = aws_lambda_function.faq.function_name
+}
+
+output "faq_api_invoke_url" {
+  description = "Invoke URL for the FAQ API Gateway stage"
+  value       = "https://${aws_api_gateway_rest_api.faq.id}.execute-api.${var.aws_region}.amazonaws.com/${aws_api_gateway_stage.faq.stage_name}/"
 }
