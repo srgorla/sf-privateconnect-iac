@@ -22,14 +22,38 @@ variable "instance_type" {
   default     = "t3.micro"
 }
 
+variable "allowed_azs" {
+  type        = list(string)
+  description = "List of AZs to use for subnets (helps avoid unsupported instance types)"
+  default     = ["us-east-1a", "us-east-1b", "us-east-1c", "us-east-1d", "us-east-1f"]
+}
+
 variable "acceptance_required" {
   type        = bool
   description = "Whether the Endpoint Service requires acceptance"
-  default     = false
+  default     = true
 }
 
 variable "allowed_principals" {
   type        = list(string)
   description = "List of AWS IAM principals allowed to create endpoints to the service"
-  default     = []
+  default     = ["arn:aws:iam::412600517540:role/pvtconn-outbound-dp001-private-connect"]
+}
+
+variable "enable_ssm_endpoints" {
+  type        = bool
+  description = "Create SSM VPC interface endpoints (for Session Manager in private subnets)"
+  default     = false
+}
+
+variable "enable_tls_listener" {
+  type        = bool
+  description = "Create a TLS listener on port 443 for the NLB"
+  default     = false
+}
+
+variable "tls_cert_arn" {
+  type        = string
+  description = "ACM certificate ARN for the NLB TLS listener (required when enable_tls_listener is true)"
+  default     = ""
 }

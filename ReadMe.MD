@@ -37,12 +37,14 @@ Key properties:
 ## What This Terraform Creates
 
 - Uses **default VPC** (for simplicity)
-- EC2 instance running a simple HTTP server
+- EC2 instance running a simple REST endpoint (`/hello`)
 - Internal Network Load Balancer
 - Target Group (type: `ip`)
 - Listener on **TCP port 80**
 - VPC Endpoint Service (PrivateLink)
 - Outputs the **endpoint service name** required by Salesforce
+- Endpoint service requires acceptance and is restricted to the Salesforce IAM role (see `allowed_principals`)
+- EC2 instance uses SSM Session Manager (enabled by default); optional VPC endpoints for private subnets
 
 ---
 
@@ -116,8 +118,9 @@ Defined in `variables.tf`:
 | `name_prefix` | Prefix for all AWS resources |
 | `vpc_id` | Optional custom VPC (empty = default VPC) |
 | `instance_type` | EC2 instance type |
-| `acceptance_required` | Require manual endpoint acceptance |
-| `allowed_principals` | Salesforce AWS principal ARN(s) |
+| `acceptance_required` | Require manual endpoint acceptance (default: true) |
+| `allowed_principals` | Salesforce AWS principal ARN(s) (default: provided role) |
+| `enable_ssm_endpoints` | Create SSM VPC endpoints for private subnets (default: false) |
 
 ---
 
@@ -130,6 +133,30 @@ terraform init
 terraform plan  -var="name_prefix=sf-privateconnect-01"
 terraform apply -var="name_prefix=sf-privateconnect-01"
 ```
+
+---
+
+## Session Manager (No SSH Needed)
+
+The EC2 instance is configured with the SSM agent and IAM role for Session Manager.
+
+If your subnets are private (no internet/NAT), enable VPC endpoints:
+
+```bash
+terraform apply -var="name_prefix=sf-privateconnect-01" -var="enable_ssm_endpoints=true"
+```
+
+---
+
+## Salesforce IAM Principal (Allowed Principals)
+
+The endpoint service defaults to allowing the Salesforce IAM role below and requires acceptance:
+
+```
+arn:aws:iam::412600517540:role/pvtconn-outbound-dp001-private-connect
+```
+
+If you need to change it, override `allowed_principals` and/or `acceptance_required` at apply time.
 
 ---
 
@@ -159,10 +186,11 @@ https://www.youtube.com/watch?v=KHE8pWnnpVE&t=169s
 2. Create a new Private Connection
 3. Paste the **endpoint service name** from Terraform output
 4. (POC) Use **Legacy Named Credential** with `http://`
-   you can use nlb  url - (ex: nlb_dns_name = "sf-privateconnect-01-nlb-532072e04e35fa9f.elb.us-east-1.amazonaws.com")
+   you can use nlb url - (ex: nlb_dns_name = "sf-privateconnect-01-nlb-532072e04e35fa9f.elb.us-east-1.amazonaws.com")
 5. Test callout using Apex
 
 TLS / HTTPS can be added later using ACM + domain if account permissions allow.
+Note: Salesforce documentation focuses on connectivity, but HTTPS still requires a valid TLS certificate on the NLB for the hostname you use.
 
 ---
 
@@ -170,7 +198,7 @@ TLS / HTTPS can be added later using ACM + domain if account permissions allow.
 
 ### Why Named Credentials
 Salesforce uses **Named Credentials** to define outbound callouts in a secure, reusable way.  
-For this POC, we intentionally use **HTTP (port 80)** to avoid TLS certificates and domain ownership requirements.
+For this POC, we intentionally use **HTTP (port 80)** to avoid TLS certificates and domain ownership requirements (no Route 53 dependency).
 
 This keeps the focus on validating **Private Connect + PrivateLink connectivity**.
 
@@ -183,8 +211,8 @@ This keeps the focus on validating **Private Connect + PrivateLink connectivity*
 1. Go to **Setup → Named Credentials**
 2. Click **New (Legacy)**
 3. Configure:
-   - **Label**: `AWS PrivateLink POC`
-   - **Name**: `AWS_PrivateLink_POC`
+   - **Label**: `AWS PrivateLink Legacy`
+   - **Name**: `AWS_PrivateLink_Legacy`
    - **URL**:  
      ```
      http://<internal-nlb-dns-name>
@@ -211,7 +239,7 @@ terraform output nlb_dns_name
 1. Go to **Setup → Named Credentials**
 2. Click **New**
 3. Configure:
-   - **Label / Name**: `AWS PrivateLink POC`
+   - **Label / Name**: `AWS PrivateLink`
    - **URL**:
      ```
      http://<internal-nlb-dns-name>
@@ -230,8 +258,9 @@ Use the Named Credential in Apex:
 
 ```apex
 HttpRequest req = new HttpRequest();
-//req.setEndpoint('callout:t1');
-req.setEndpoint('callout:AWS_PrivateLink_POC');
+//req.setEndpoint('callout:AWS_PrivateLink_Legacy/hello');
+req.setEndpoint('callout:AWS_PrivateLink/hello');
+req.setTimeout(12000);
 req.setMethod('GET');
 
 Http http = new Http();
@@ -241,9 +270,14 @@ System.debug(res.getStatus());
 System.debug(res.getBody());
 ```
 
-Expected response:
-```
-<h1>Salesforce Private Connect POC OK 🚀</h1>
+Expected response (JSON) from the `/hello` REST endpoint:
+```json
+{
+  "ok": true,
+  "message": "Hello from AWS via PrivateLink",
+  "timestamp_cst": "2024-01-01T12:34:56-06:00",
+  "timezone": "America/Chicago"
+}
 ```
 
 ---
