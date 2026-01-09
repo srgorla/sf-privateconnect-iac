@@ -67,3 +67,18 @@ output "faq_api_invoke_url" {
   description = "Invoke URL for the FAQ API Gateway stage"
   value       = "https://${aws_api_gateway_rest_api.faq.id}.execute-api.${var.aws_region}.amazonaws.com/${aws_api_gateway_stage.faq.stage_name}/"
 }
+
+output "private_api_vpc_id" {
+  description = "VPC ID for the private API Gateway access"
+  value       = aws_vpc.private_api.id
+}
+
+output "private_api_vpce_id" {
+  description = "VPC endpoint ID for private API Gateway access"
+  value       = aws_vpc_endpoint.private_api_execute_api.id
+}
+
+output "faq_private_api_invoke_url" {
+  description = "Invoke URL for the private FAQ API (resolves inside the private VPC via the VPC endpoint)"
+  value       = "https://${aws_api_gateway_rest_api.faq_private.id}.execute-api.${var.aws_region}.amazonaws.com/${aws_api_gateway_stage.faq_private.stage_name}/"
+}

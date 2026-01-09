@@ -16,9 +16,21 @@ variable "vpc_cidr" {
   default     = "10.0.0.0/16"
 }
 
+variable "private_vpc_cidr" {
+  type        = string
+  description = "CIDR block for the private VPC that hosts the private API Gateway access"
+  default     = "10.1.0.0/16"
+}
+
 variable "public_subnet_newbits" {
   type        = number
   description = "New bits for public subnet CIDR calculation (vpc_cidr is split by this many bits)"
+  default     = 8
+}
+
+variable "private_subnet_newbits" {
+  type        = number
+  description = "New bits for private subnet CIDR calculation (private_vpc_cidr is split by this many bits)"
   default     = 8
 }
 

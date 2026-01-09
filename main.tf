@@ -79,6 +79,67 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+########################################
+# Network: Private VPC for private API Gateway access
+########################################
+
+resource "aws_vpc" "private_api" {
+  cidr_block           = var.private_vpc_cidr
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+
+  tags = {
+    Name = "${var.name_prefix}-private-api-vpc"
+  }
+}
+
+resource "aws_subnet" "private_api" {
+  count                   = length(var.allowed_azs)
+  vpc_id                  = aws_vpc.private_api.id
+  cidr_block              = cidrsubnet(var.private_vpc_cidr, var.private_subnet_newbits, count.index)
+  availability_zone       = var.allowed_azs[count.index]
+  map_public_ip_on_launch = false
+
+  tags = {
+    Name = "${var.name_prefix}-private-api-${var.allowed_azs[count.index]}"
+  }
+}
+
+resource "aws_security_group" "private_api_vpce_sg" {
+  name        = "${var.name_prefix}-private-api-vpce-sg"
+  description = "Allow HTTPS to the private API Gateway VPC endpoint"
+  vpc_id      = aws_vpc.private_api.id
+
+  ingress {
+    description = "HTTPS from private VPC"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = [aws_vpc.private_api.cidr_block]
+  }
+
+  egress {
+    description = "All outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "${var.name_prefix}-private-api-vpce-sg"
+  }
+}
+
+resource "aws_vpc_endpoint" "private_api_execute_api" {
+  vpc_id              = aws_vpc.private_api.id
+  service_name        = "com.amazonaws.${var.aws_region}.execute-api"
+  vpc_endpoint_type   = "Interface"
+  private_dns_enabled = true
+  subnet_ids          = aws_subnet.private_api[*].id
+  security_group_ids  = [aws_security_group.private_api_vpce_sg.id]
+}
+
 locals {
   # For a POC, use all public subnets in the VPC.
   nlb_subnet_ids      = sort(aws_subnet.public[*].id)
@@ -751,4 +812,90 @@ resource "aws_api_gateway_stage" "faq" {
   rest_api_id   = aws_api_gateway_rest_api.faq.id
   deployment_id = aws_api_gateway_deployment.faq.id
   stage_name    = "myDeployment"
+}
+
+########################################
+# Private API Gateway (FAQ microservice)
+########################################
+
+resource "aws_api_gateway_rest_api" "faq_private" {
+  name        = "${var.name_prefix}-faq-private-api"
+  description = "Provide a random FAQ (private)"
+
+  endpoint_configuration {
+    types = ["PRIVATE"]
+  }
+}
+
+data "aws_iam_policy_document" "faq_private_api_policy" {
+  statement {
+    sid     = "AllowInvokeFromPrivateVpce"
+    effect  = "Allow"
+    actions = ["execute-api:Invoke"]
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+
+    resources = ["${aws_api_gateway_rest_api.faq_private.execution_arn}/*/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceVpce"
+      values   = [aws_vpc_endpoint.private_api_execute_api.id]
+    }
+  }
+}
+
+resource "aws_api_gateway_rest_api_policy" "faq_private" {
+  rest_api_id = aws_api_gateway_rest_api.faq_private.id
+  policy      = data.aws_iam_policy_document.faq_private_api_policy.json
+}
+
+resource "aws_api_gateway_method" "faq_private_get_root" {
+  rest_api_id   = aws_api_gateway_rest_api.faq_private.id
+  resource_id   = aws_api_gateway_rest_api.faq_private.root_resource_id
+  http_method   = "GET"
+  authorization = "NONE"
+}
+
+resource "aws_api_gateway_integration" "faq_private_lambda" {
+  rest_api_id = aws_api_gateway_rest_api.faq_private.id
+  resource_id = aws_api_gateway_rest_api.faq_private.root_resource_id
+  http_method = aws_api_gateway_method.faq_private_get_root.http_method
+
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.faq.invoke_arn
+}
+
+resource "aws_lambda_permission" "faq_private_apigw" {
+  statement_id  = "AllowExecutionFromPrivateApiGateway"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.faq.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_api_gateway_rest_api.faq_private.execution_arn}/*/*"
+}
+
+resource "aws_api_gateway_deployment" "faq_private" {
+  rest_api_id = aws_api_gateway_rest_api.faq_private.id
+
+  triggers = {
+    redeploy = sha1(jsonencode([
+      aws_api_gateway_method.faq_private_get_root.id,
+      aws_api_gateway_integration.faq_private_lambda.id,
+    ]))
+  }
+
+  depends_on = [
+    aws_api_gateway_integration.faq_private_lambda,
+    aws_api_gateway_rest_api_policy.faq_private,
+  ]
+}
+
+resource "aws_api_gateway_stage" "faq_private" {
+  rest_api_id   = aws_api_gateway_rest_api.faq_private.id
+  deployment_id = aws_api_gateway_deployment.faq_private.id
+  stage_name    = "private"
 }
