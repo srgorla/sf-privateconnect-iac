@@ -140,6 +140,33 @@ resource "aws_vpc_endpoint" "private_api_execute_api" {
   security_group_ids  = [aws_security_group.private_api_vpce_sg.id]
 }
 
+resource "aws_vpc_endpoint" "private_api_ssm" {
+  vpc_id              = aws_vpc.private_api.id
+  service_name        = "com.amazonaws.${var.aws_region}.ssm"
+  vpc_endpoint_type   = "Interface"
+  private_dns_enabled = true
+  subnet_ids          = aws_subnet.private_api[*].id
+  security_group_ids  = [aws_security_group.private_api_vpce_sg.id]
+}
+
+resource "aws_vpc_endpoint" "private_api_ssmmessages" {
+  vpc_id              = aws_vpc.private_api.id
+  service_name        = "com.amazonaws.${var.aws_region}.ssmmessages"
+  vpc_endpoint_type   = "Interface"
+  private_dns_enabled = true
+  subnet_ids          = aws_subnet.private_api[*].id
+  security_group_ids  = [aws_security_group.private_api_vpce_sg.id]
+}
+
+resource "aws_vpc_endpoint" "private_api_ec2messages" {
+  vpc_id              = aws_vpc.private_api.id
+  service_name        = "com.amazonaws.${var.aws_region}.ec2messages"
+  vpc_endpoint_type   = "Interface"
+  private_dns_enabled = true
+  subnet_ids          = aws_subnet.private_api[*].id
+  security_group_ids  = [aws_security_group.private_api_vpce_sg.id]
+}
+
 locals {
   # For a POC, use all public subnets in the VPC.
   nlb_subnet_ids      = sort(aws_subnet.public[*].id)
@@ -735,6 +762,95 @@ resource "aws_security_group" "faq_lambda_sg" {
 
   tags = {
     Name = "${var.name_prefix}-faq-lambda-sg"
+  }
+}
+
+resource "aws_iam_role" "private_ssm_role" {
+  name = "${var.name_prefix}-private-ssm-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "private_ssm_core" {
+  role       = aws_iam_role.private_ssm_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_instance_profile" "private_ssm_profile" {
+  name = "${var.name_prefix}-private-ssm-profile"
+  role = aws_iam_role.private_ssm_role.name
+}
+
+resource "aws_security_group" "private_ssm_sg" {
+  name        = "${var.name_prefix}-private-ssm-sg"
+  description = "Security group for private SSM test instance"
+  vpc_id      = aws_vpc.private_api.id
+
+  egress {
+    description = "Allow HTTPS to VPC endpoints"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = [aws_vpc.private_api.cidr_block]
+  }
+
+  egress {
+    description = "Allow DNS to VPC resolver"
+    from_port   = 53
+    to_port     = 53
+    protocol    = "udp"
+    cidr_blocks = [aws_vpc.private_api.cidr_block]
+  }
+
+  egress {
+    description = "Allow DNS to VPC resolver (TCP fallback)"
+    from_port   = 53
+    to_port     = 53
+    protocol    = "tcp"
+    cidr_blocks = [aws_vpc.private_api.cidr_block]
+  }
+
+  egress {
+    description = "Allow IMDS"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["169.254.169.254/32"]
+  }
+
+  tags = {
+    Name = "${var.name_prefix}-private-ssm-sg"
+  }
+}
+
+resource "aws_instance" "private_ssm_test" {
+  ami                    = data.aws_ami.al2023.id
+  instance_type          = var.instance_type
+  subnet_id              = aws_subnet.private_api[0].id
+  vpc_security_group_ids = [aws_security_group.private_ssm_sg.id]
+  iam_instance_profile   = aws_iam_instance_profile.private_ssm_profile.name
+  associate_public_ip_address = false
+
+  user_data = <<-EOF
+              #!/bin/bash
+              set -euo pipefail
+              systemctl enable --now amazon-ssm-agent
+              systemctl status amazon-ssm-agent --no-pager || true
+              EOF
+
+  tags = {
+    Name = "${var.name_prefix}-private-ssm-test"
   }
 }
 

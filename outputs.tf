@@ -82,3 +82,18 @@ output "faq_private_api_invoke_url" {
   description = "Invoke URL for the private FAQ API (resolves inside the private VPC via the VPC endpoint)"
   value       = "https://${aws_api_gateway_rest_api.faq_private.id}.execute-api.${var.aws_region}.amazonaws.com/${aws_api_gateway_stage.faq_private.stage_name}/"
 }
+
+output "private_ssm_instance_id" {
+  description = "EC2 instance ID for SSM testing inside the private VPC"
+  value       = aws_instance.private_ssm_test.id
+}
+
+output "private_ssm_session_target" {
+  description = "SSM Session Manager target for the private test instance"
+  value       = aws_instance.private_ssm_test.id
+}
+
+output "private_ssm_start_session_command" {
+  description = "Command to start an SSM session to the private test instance"
+  value       = "aws ssm start-session --target ${aws_instance.private_ssm_test.id} --region ${var.aws_region}"
+}

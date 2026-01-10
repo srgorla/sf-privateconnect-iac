@@ -2,7 +2,7 @@
 
 This repository provisions a **Salesforce Private Connect (AWS PrivateLink) proof of concept** using Terraform.
 
-It creates a private AWS backend (EC2 + internal Network Load Balancer) exposed via a **VPC Endpoint Service**, which Salesforce can connect to using **Private Connect**, without traversing the public internet. It also provisions a **FAQ Lambda + API Gateway** example wired into the same VPC.
+It creates a private AWS backend (EC2 + internal Network Load Balancer) exposed via a **VPC Endpoint Service**, which Salesforce can connect to using **Private Connect**, without traversing the public internet. It also provisions a **FAQ Lambda + API Gateway** example (public) plus a **private API Gateway** reachable only from a dedicated private VPC.
 
 The setup is designed for **short-lived AWS accounts** (e.g. Pluralsight labs) and can be recreated end-to-end in minutes.
 
@@ -19,10 +19,10 @@ AWS PrivateLink                         Amazon API Gateway
    |                                         |
 VPC Endpoint Service                         |
    |                                         |
-Internal Network Load Balancer (TCP : 80)    |
-   |                                         |
-Target Group (IP)                            |
-   |                                         |
+Internal Network Load Balancer (TCP : 80)    |     Private VPC
+   |                                         |        |
+Target Group (IP)                            |        |  (Interface VPCE: execute-api)
+   |                                         |        |
 EC2 Instance (Simple HTTP Server)        Lambda (VPC-attached)
 ```
 
@@ -44,10 +44,12 @@ Key properties:
 - VPC Endpoint Service (PrivateLink)
 - Outputs the **endpoint service name** required by Salesforce
 - Endpoint service requires acceptance and is restricted to the Salesforce IAM role (see `allowed_principals`)
-- EC2 instance uses SSM Session Manager (enabled by default); optional VPC endpoints for private subnets
+- EC2 instance uses SSM Session Manager (enabled by default); optional SSM VPC endpoints for the main VPC, private VPC includes endpoints for the test instance
 - S3 buckets (public, VPC-only, PrivateConnect-only) seeded with sample files
 - FAQ Lambda function deployed into the VPC
-- API Gateway REST endpoint that invokes the FAQ Lambda
+- Public API Gateway REST endpoint that invokes the FAQ Lambda
+- Private API Gateway REST endpoint (PRIVATE) that invokes the same FAQ Lambda
+- Private VPC with interface endpoints and a private EC2 instance for SSM testing
 
 ---
 
@@ -124,6 +126,8 @@ Defined in `variables.tf`:
 | `name_prefix` | Prefix for all AWS resources |
 | `vpc_cidr` | CIDR for the VPC |
 | `public_subnet_newbits` | CIDR split size for public subnets |
+| `private_vpc_cidr` | CIDR for the private VPC (private API access) |
+| `private_subnet_newbits` | CIDR split size for private subnets |
 | `allowed_azs` | AZs used for public subnets |
 | `instance_type` | EC2 instance type |
 | `acceptance_required` | Require manual endpoint acceptance (default: true) |
@@ -177,6 +181,20 @@ If your subnets are private (no internet/NAT), enable VPC endpoints:
 terraform apply -var="enable_ssm_endpoints=true"
 ```
 
+### Private VPC SSM Test Instance
+
+This stack also provisions a **private EC2 instance** in the private VPC for testing the private API. It uses SSM Session Manager and interface VPC endpoints (no public IP, no SSH).
+
+Connect:
+```bash
+aws ssm start-session --target "$(terraform output -raw private_ssm_instance_id)" --region us-east-1
+```
+
+Then test the private API from the session:
+```bash
+curl "$(terraform output -raw faq_private_api_invoke_url)"
+```
+
 ---
 
 ## Salesforce IAM Principal (Allowed Principals)
@@ -207,10 +225,16 @@ endpoint_service_name = com.amazonaws.vpce.us-east-1.vpce-svc-xxxxxxxx
 
 This value is required in **Salesforce Setup → Private Connect**.
 
-FAQ API output:
+FAQ API output (public):
 ```
 faq_api_invoke_url = https://xxxxxxxxxx.execute-api.us-east-1.amazonaws.com/myDeployment/
 ```
+
+Private FAQ API output (private VPC only):
+```
+faq_private_api_invoke_url = https://xxxxxxxxxx.execute-api.us-east-1.amazonaws.com/private/
+```
+This URL resolves and is reachable only from inside the private VPC via the `execute-api` VPC endpoint.
 
 ---
 
