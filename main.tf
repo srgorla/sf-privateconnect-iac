@@ -79,6 +79,15 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+resource "aws_vpc_endpoint" "execute_api" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${var.aws_region}.execute-api"
+  vpc_endpoint_type   = "Interface"
+  private_dns_enabled = true
+  subnet_ids          = local.nlb_subnet_ids
+  security_group_ids  = [aws_security_group.execute_api_vpce_sg.id]
+}
+
 ########################################
 # Network: Private VPC for private API Gateway access
 ########################################
@@ -200,6 +209,30 @@ resource "aws_iam_role" "web_ssm_role" {
   })
 }
 
+resource "aws_iam_role_policy" "web_s3_read" {
+  name = "${var.name_prefix}-web-s3-read"
+  role = aws_iam_role.web_ssm_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          aws_s3_bucket.private.arn,
+          "${aws_s3_bucket.private.arn}/*",
+          aws_s3_bucket.privateconnect.arn,
+          "${aws_s3_bucket.privateconnect.arn}/*"
+        ]
+      }
+    ]
+  })
+}
+
 resource "aws_iam_role_policy_attachment" "web_ssm_core" {
   role       = aws_iam_role.web_ssm_role.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
@@ -238,6 +271,32 @@ resource "aws_security_group" "web_sg" {
   }
 }
 
+resource "aws_security_group" "execute_api_vpce_sg" {
+  name        = "${var.name_prefix}-execute-api-vpce-sg"
+  description = "Allow HTTPS to API Gateway VPC endpoint"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description = "HTTPS from VPC"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = [aws_vpc.main.cidr_block]
+  }
+
+  egress {
+    description = "All outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "${var.name_prefix}-execute-api-vpce-sg"
+  }
+}
+
 # Amazon Linux 2023 AMI (x86_64)
 data "aws_ami" "al2023" {
   most_recent = true
@@ -267,9 +326,13 @@ resource "aws_instance" "web" {
               dnf install -y amazon-ssm-agent
               systemctl enable --now amazon-ssm-agent
               pip3 install flask
+              pip3 install requests
+              pip3 install boto3
 
               cat << 'APP' > /opt/app.py
               from flask import Flask, jsonify
+              import requests
+              import boto3
               app = Flask(__name__)
 
               @app.get("/hello")
@@ -284,6 +347,21 @@ resource "aws_instance" "web" {
                       timestamp_cst=now_cst.isoformat(),
                       timezone=str(now_cst.tzinfo),
                   )
+
+              @app.get("/faq")
+              def faq():
+                  resp = requests.get(
+                      "https://${aws_api_gateway_rest_api.faq_private.id}.execute-api.${var.aws_region}.amazonaws.com/${aws_api_gateway_stage.faq_private.stage_name}/",
+                      timeout=10,
+                  )
+                  return (resp.text, resp.status_code, {"Content-Type": "application/json"})
+
+              @app.get("/s3/hello")
+              def s3_hello():
+                  s3 = boto3.client("s3", region_name="${var.aws_region}")
+                  obj = s3.get_object(Bucket="${aws_s3_bucket.private.id}", Key="hello.txt")
+                  body = obj["Body"].read().decode("utf-8")
+                  return (body, 200, {"Content-Type": "text/plain"})
 
               app.run(host="0.0.0.0", port=80)
               APP
@@ -959,7 +1037,10 @@ data "aws_iam_policy_document" "faq_private_api_policy" {
     condition {
       test     = "StringEquals"
       variable = "aws:SourceVpce"
-      values   = [aws_vpc_endpoint.private_api_execute_api.id]
+      values   = [
+        aws_vpc_endpoint.private_api_execute_api.id,
+        aws_vpc_endpoint.execute_api.id,
+      ]
     }
   }
 }

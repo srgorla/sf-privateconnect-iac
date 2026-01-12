@@ -49,6 +49,8 @@ Key properties:
 - FAQ Lambda function deployed into the VPC
 - Public API Gateway REST endpoint that invokes the FAQ Lambda
 - Private API Gateway REST endpoint (PRIVATE) that invokes the same FAQ Lambda
+- NLB-backed proxy path `/faq` that forwards to the private API (for Salesforce Private Connect access)
+- NLB-backed proxy path `/s3/hello` that reads a private S3 object via the VPC endpoint
 - Private VPC with interface endpoints and a private EC2 instance for SSM testing
 
 ---
@@ -235,6 +237,19 @@ Private FAQ API output (private VPC only):
 faq_private_api_invoke_url = https://xxxxxxxxxx.execute-api.us-east-1.amazonaws.com/private/
 ```
 This URL resolves and is reachable only from inside the private VPC via the `execute-api` VPC endpoint.
+
+Private Connect FAQ proxy (NLB):
+- Use your Salesforce Private Connect alias (or the NLB DNS internally) with the `/faq` path:
+  ```
+  http://<private-connect-alias>/faq
+  ```
+
+Private Connect S3 proxy (NLB):
+- Reads `s3://<vpc-bucket>/hello.txt` via the VPC S3 endpoint.
+- Use your Salesforce Private Connect alias with the `/s3/hello` path:
+  ```
+  http://<private-connect-alias>/s3/hello
+  ```
 
 ---
 

@@ -13,6 +13,16 @@ output "nlb_dns_name" {
   value       = aws_lb.nlb.dns_name
 }
 
+output "nlb_faq_path" {
+  description = "FAQ proxy path on the NLB (usable via Private Connect alias)"
+  value       = "/faq"
+}
+
+output "nlb_s3_hello_path" {
+  description = "S3 hello proxy path on the NLB (usable via Private Connect alias)"
+  value       = "/s3/hello"
+}
+
 output "ec2_instance_id" {
   description = "EC2 instance ID for the POC backend"
   value       = aws_instance.web.id
