@@ -243,6 +243,9 @@ Private Connect FAQ proxy (NLB):
   ```
   http://<private-connect-alias>/faq
   ```
+  Notes:
+  - The Private Connect alias can be inconsistent right after setup; give it a few minutes or click Sync in Salesforce.
+  - The NLB DNS name over HTTP is the most stable option for POC testing.
 
 Private Connect S3 proxy (NLB):
 - Reads `s3://<vpc-bucket>/hello.txt` via the VPC S3 endpoint.
@@ -250,12 +253,20 @@ Private Connect S3 proxy (NLB):
   ```
   http://<private-connect-alias>/s3/hello
   ```
+  Notes:
+  - If alias-based calls are flaky, use the NLB DNS name with the Private Connect outbound connection selected.
+  - HTTPS requires a custom domain + ACM certificate on the NLB (not needed for HTTP POC).
 
 ---
 
 ## Salesforce Side (High-Level)
 
 https://www.youtube.com/watch?v=KHE8pWnnpVE&t=169s
+
+## Videos
+
+- Demo: https://www.youtube.com/watch?v=tlAaA71TWEM
+- Detailed explanation: https://www.youtube.com/watch?v=_HKbik-3AH0
 
 1. Go to **Setup → Private Connect**
 2. Create a new Private Connection
