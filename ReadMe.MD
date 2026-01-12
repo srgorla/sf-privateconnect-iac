@@ -50,6 +50,7 @@ Key properties:
 - Public API Gateway REST endpoint that invokes the FAQ Lambda
 - Private API Gateway REST endpoint (PRIVATE) that invokes the same FAQ Lambda
 - NLB-backed proxy path `/faq` that forwards to the private API (for Salesforce Private Connect access)
+  - Request flow: Salesforce → Private Connect → NLB → EC2 `/faq` → Private API Gateway → FAQ Lambda
 - NLB-backed proxy path `/s3/hello` that reads a private S3 object via the VPC endpoint
 - Private VPC with interface endpoints and a private EC2 instance for SSM testing
 
